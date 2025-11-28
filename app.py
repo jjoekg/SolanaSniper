@@ -116,65 +116,67 @@ def send_telegram_msg(msg):
 
 def scan_new_pairs():
     """
-    策略：抓取大量 Solana 交易對 -> 本地端強制按時間排序 -> 過濾掉老幣
+    雙重策略掃描：確保一定有幣可以看
+    策略 1: 抓 'pump' 關鍵字的新幣 (最優先)
+    策略 2: 抓 'sol' 關鍵字的熱門幣 (保底)
     """
-    # 1. 抓取範圍擴大 (我們不搜 pump 了，直接搜 solana 抓最廣的範圍)
-    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-    
-    # 2. 嚴格黑名單 (地址 & 名稱)
+    # 知名老幣地址黑名單 (只擋地址，不擋名字，以免誤殺 'Baby Solana')
     BLACKLIST_ADDR = [
         "So11111111111111111111111111111111111111112", # Wrapped SOL
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
-        "DxvQPgEznnZ2Z3svb4YXWyugVX1QJpTVszZYy326mhv8", # 你剛剛抓到的那個怪 SOL
+        "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", # mSOL
     ]
+
+    def fetch_and_filter(keyword, max_hours=24):
+        try:
+            url = f"https://api.dexscreener.com/latest/dex/search?q={keyword}"
+            res = requests.get(url, timeout=10).json()
+            raw_pairs = res.get('pairs', [])
+            valid = []
+            current_time = time.time() * 1000 
+            
+            for p in raw_pairs:
+                # 1. 鏈檢查
+                if p.get('chainId') != 'solana': continue
+                
+                # 2. 地址黑名單
+                addr = p.get('baseToken', {}).get('address', '')
+                if addr in BLACKLIST_ADDR: continue
+                
+                # 3. 流動性過濾 (太低無法交易)
+                if p.get('liquidity', {}).get('usd', 0) < 500: continue
+                
+                # 4. 時間過濾 (如果有設定)
+                created_at = p.get('pairCreatedAt', 0)
+                if max_hours > 0 and created_at > 0:
+                    age_hours = (current_time - created_at) / (1000 * 60 * 60)
+                    if age_hours > max_hours: continue
+                
+                valid.append(p)
+            
+            # 按時間倒序 (最新的在前面)
+            valid.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
+            return valid
+        except: return []
+
+    # --- 執行策略 ---
     
-    BLACKLIST_NAMES = ["Solana", "Wrapped Sol", "USDC", "USDT"]
-
-    try:
-        res = requests.get(url, timeout=10).json()
-        raw_pairs = res.get('pairs', [])
+    # 策略 1: 找剛出爐的 Pump 幣 (限制 24 小時內)
+    st.toast("正在搜尋 24h 內的新幣...")
+    results = fetch_and_filter("pump", max_hours=24)
+    
+    # 策略 2: 如果沒東西，找最近熱門的 SOL 相關幣 (放寬到 7 天)
+    if not results:
+        st.toast("新幣過濾太嚴格，切換至熱門幣模式...")
+        results = fetch_and_filter("sol", max_hours=168)
         
-        valid_pairs = []
-        current_time = time.time() * 1000 
-        
-        for p in raw_pairs:
-            # A. 鏈檢查
-            if p.get('chainId') != 'solana': continue
-            
-            # B. 獲取資訊
-            base_token = p.get('baseToken', {})
-            name = base_token.get('name', 'Unknown')
-            addr = base_token.get('address', '')
-            created_at = p.get('pairCreatedAt', 0)
-            
-            # C. 黑名單過濾 (名稱 & 地址)
-            if addr in BLACKLIST_ADDR: continue
-            if any(bad_name.lower() in name.lower() for bad_name in BLACKLIST_NAMES): continue
-            
-            # D. 強制過濾老幣 (只留 24 小時內的)
-            # 如果 API 沒回傳時間，就跳過
-            if created_at == 0: continue
-            
-            age_hours = (current_time - created_at) / (1000 * 60 * 60)
-            if age_hours > 24: continue 
+    # 策略 3: 如果還是沒東西，隨便抓 (不限時間，只求有數據)
+    if not results:
+        results = fetch_and_filter("sol", max_hours=0)
 
-            # E. 流動性過濾 (垃圾盤過濾)
-            liquidity = p.get('liquidity', {}).get('usd', 0)
-            if liquidity < 1000: continue 
-            
-            valid_pairs.append(p)
-            
-        # 🔥 關鍵一步：強制按「出生時間」排序 (最新的在前面)
-        # Python 的 sort 是從小到大，所以 reverse=True 代表時間越大(越新)越前面
-        valid_pairs.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
-        
-        # 只回傳最新的 5 個
-        return valid_pairs[:5]
-
-    except Exception as e: 
-        st.error(f"DexScreener 連線失敗: {e}")
-        return []
+    # 回傳前 5 名
+    return results[:5]
 # ==========================================
 # 4. 主介面 (UI)
 # ==========================================
