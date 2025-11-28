@@ -116,60 +116,70 @@ def send_telegram_msg(msg):
 
 def scan_new_pairs():
     """
-    策略：利用『流動性天花板』過濾老幣
-    邏輯：剛開盤的土狗幣，池子絕不可能超過 50 萬美金。
+    策略：多關鍵字輪詢 + 強制時間排序 (保證有數據)
     """
-    # 搜尋範圍最廣的關鍵字
-    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+    # 搜尋關鍵字列表 (如果第一個沒東西，就試第二個)
+    keywords = ["pump", "meme", "cat", "dog"]
     
     # 絕對黑名單 (地址)
     BLACKLIST_ADDR = [
         "So11111111111111111111111111111111111111112", # Wrapped SOL
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
     ]
 
+    all_candidates = []
+
     try:
-        res = requests.get(url, timeout=10).json()
-        raw_pairs = res.get('pairs', [])
+        # 1. 輪詢關鍵字，抓取資料
+        for kw in keywords:
+            url = f"https://api.dexscreener.com/latest/dex/search?q={kw}"
+            res = requests.get(url, timeout=5).json()
+            pairs = res.get('pairs', [])
+            
+            for p in pairs:
+                # 只抓 Solana
+                if p.get('chainId') != 'solana': continue
+                
+                # 黑名單過濾
+                base_addr = p.get('baseToken', {}).get('address', '')
+                if base_addr in BLACKLIST_ADDR: continue
+                
+                # 名稱過濾 (再殺一次 Solana)
+                name = p.get('baseToken', {}).get('name', '').lower()
+                if name == 'solana' or name == 'wrapped sol': continue
+                
+                # 收集起來 (不去重了，反正後面會切片)
+                all_candidates.append(p)
+            
+            # 如果已經收集夠多了，就不用搜下一個關鍵字了
+            if len(all_candidates) > 20:
+                break
         
-        valid_pairs = []
-        current_time = time.time() * 1000 
+        if not all_candidates:
+            st.error("DexScreener API 暫時無回應，請稍後再試。")
+            return []
+
+        # 2. 關鍵一步：全部抓回來後，按「出生時間」倒序排列
+        # 最新的排在最前面 (不管是 1 小時前還是 3 天前，最新的就是它)
+        all_candidates.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
         
-        for p in raw_pairs:
-            # 1. 鏈檢查
-            if p.get('chainId') != 'solana': continue
-            
-            # 2. 獲取基本資訊
-            base_token = p.get('baseToken', {})
-            symbol = base_token.get('symbol', '').upper()
-            addr = base_token.get('address', '')
-            
-            # 3. 絕對黑名單 & 符號過濾 (再殺一次 SOL)
-            if addr in BLACKLIST_ADDR: continue
-            if symbol == "SOL": continue 
-            
-            # 4. 🔥 核心絕殺：流動性過濾 (Liquidity Filter)
-            # 土狗幣的池子通常在 $1,000 ~ $200,000 之間
-            # 如果池子 > $500,000 (50萬鎂)，通常是老幣或超級大幣，我們不要
-            liquidity = p.get('liquidity', {}).get('usd', 0)
-            
-            if liquidity < 1000: continue # 太小，無法交易 (可能是詐騙)
-            if liquidity > 500000: continue # 太大，這絕對是老幣 (例如 SOL, JUP, RAY)
-            
-            # 5. 時間過濾 (24小時內)
-            created_at = p.get('pairCreatedAt', 0)
-            if created_at > 0:
-                age_hours = (current_time - created_at) / (1000 * 60 * 60)
-                if age_hours > 24: continue
-            
-            valid_pairs.append(p)
-            
-        # 按時間倒序 (最新的在前面)
-        valid_pairs.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
-        
-        return valid_pairs[:5]
+        # 3. 取前 5 名
+        # 為了避免重複 (不同關鍵字抓到同一個幣)，這裡做簡單去重
+        seen_addr = set()
+        final_list = []
+        for p in all_candidates:
+            addr = p.get('baseToken', {}).get('address', '')
+            if addr not in seen_addr:
+                seen_addr.add(addr)
+                final_list.append(p)
+            if len(final_list) >= 5:
+                break
+                
+        return final_list
 
     except Exception as e: 
-        st.error(f"DexScreener 連線失敗: {e}")
+        st.error(f"掃描失敗: {e}")
         return []
     # --- 執行策略 ---
     
