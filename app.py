@@ -116,17 +116,20 @@ def send_telegram_msg(msg):
 
 def scan_new_pairs():
     """
-    策略：搜尋關鍵字 'pump' (針對 Pump.fun 新幣)，並過濾出 Solana 鏈
+    策略：抓取大量 Solana 交易對 -> 本地端強制按時間排序 -> 過濾掉老幣
     """
-    # 改用 'pump' 作為關鍵字，比較容易抓到新土狗
-    url = "https://api.dexscreener.com/latest/dex/search?q=pump"
+    # 1. 抓取範圍擴大 (我們不搜 pump 了，直接搜 solana 抓最廣的範圍)
+    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
     
-    # 黑名單 (過濾掉老幣/穩定幣)
-    BLACKLIST = [
+    # 2. 嚴格黑名單 (地址 & 名稱)
+    BLACKLIST_ADDR = [
         "So11111111111111111111111111111111111111112", # Wrapped SOL
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
+        "DxvQPgEznnZ2Z3svb4YXWyugVX1QJpTVszZYy326mhv8", # 你剛剛抓到的那個怪 SOL
     ]
+    
+    BLACKLIST_NAMES = ["Solana", "Wrapped Sol", "USDC", "USDT"]
 
     try:
         res = requests.get(url, timeout=10).json()
@@ -136,43 +139,38 @@ def scan_new_pairs():
         current_time = time.time() * 1000 
         
         for p in raw_pairs:
-            # 1. 嚴格限定 Solana 鏈
+            # A. 鏈檢查
             if p.get('chainId') != 'solana': continue
             
-            token_addr = p.get('baseToken', {}).get('address', '')
-            
-            # 2. 黑名單過濾
-            if token_addr in BLACKLIST: continue
-            
-            # 3. 幣齡過濾 (放寬到 72 小時，確保有數據)
+            # B. 獲取資訊
+            base_token = p.get('baseToken', {})
+            name = base_token.get('name', 'Unknown')
+            addr = base_token.get('address', '')
             created_at = p.get('pairCreatedAt', 0)
-            if created_at > 0:
-                age_hours = (current_time - created_at) / (1000 * 60 * 60)
-                # 超過 3 天的就不看了，專注在近期熱點
-                if age_hours > 72: continue
             
-            # 4. 流動性過濾 (至少要有 $500 鎂，不然是死盤)
+            # C. 黑名單過濾 (名稱 & 地址)
+            if addr in BLACKLIST_ADDR: continue
+            if any(bad_name.lower() in name.lower() for bad_name in BLACKLIST_NAMES): continue
+            
+            # D. 強制過濾老幣 (只留 24 小時內的)
+            # 如果 API 沒回傳時間，就跳過
+            if created_at == 0: continue
+            
+            age_hours = (current_time - created_at) / (1000 * 60 * 60)
+            if age_hours > 24: continue 
+
+            # E. 流動性過濾 (垃圾盤過濾)
             liquidity = p.get('liquidity', {}).get('usd', 0)
-            if liquidity < 500: continue
+            if liquidity < 1000: continue 
             
             valid_pairs.append(p)
             
-            # 取前 5 個
-            if len(valid_pairs) >= 5:
-                break
+        # 🔥 關鍵一步：強制按「出生時間」排序 (最新的在前面)
+        # Python 的 sort 是從小到大，所以 reverse=True 代表時間越大(越新)越前面
+        valid_pairs.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
         
-        # 如果還是抓不到 (例如 Pump 關鍵字失效)，啟動備用方案：抓熱門榜
-        if not valid_pairs:
-            # 備用：搜尋 'solana' 但不設時間限制，只為了顯示數據
-            fallback_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-            res = requests.get(fallback_url, timeout=10).json()
-            raw_pairs = res.get('pairs', [])
-            for p in raw_pairs:
-                if p.get('chainId') == 'solana' and p.get('baseToken', {}).get('address') not in BLACKLIST:
-                     valid_pairs.append(p)
-                if len(valid_pairs) >= 5: break
-                
-        return valid_pairs
+        # 只回傳最新的 5 個
+        return valid_pairs[:5]
 
     except Exception as e: 
         st.error(f"DexScreener 連線失敗: {e}")
