@@ -116,50 +116,61 @@ def send_telegram_msg(msg):
 
 def scan_new_pairs():
     """
-    雙重策略掃描：確保一定有幣可以看
-    策略 1: 抓 'pump' 關鍵字的新幣 (最優先)
-    策略 2: 抓 'sol' 關鍵字的熱門幣 (保底)
+    策略：利用『流動性天花板』過濾老幣
+    邏輯：剛開盤的土狗幣，池子絕不可能超過 50 萬美金。
     """
-    # 知名老幣地址黑名單 (只擋地址，不擋名字，以免誤殺 'Baby Solana')
+    # 搜尋範圍最廣的關鍵字
+    url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+    
+    # 絕對黑名單 (地址)
     BLACKLIST_ADDR = [
         "So11111111111111111111111111111111111111112", # Wrapped SOL
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
-        "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", # mSOL
     ]
 
-    def fetch_and_filter(keyword, max_hours=24):
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/search?q={keyword}"
-            res = requests.get(url, timeout=10).json()
-            raw_pairs = res.get('pairs', [])
-            valid = []
-            current_time = time.time() * 1000 
+    try:
+        res = requests.get(url, timeout=10).json()
+        raw_pairs = res.get('pairs', [])
+        
+        valid_pairs = []
+        current_time = time.time() * 1000 
+        
+        for p in raw_pairs:
+            # 1. 鏈檢查
+            if p.get('chainId') != 'solana': continue
             
-            for p in raw_pairs:
-                # 1. 鏈檢查
-                if p.get('chainId') != 'solana': continue
-                
-                # 2. 地址黑名單
-                addr = p.get('baseToken', {}).get('address', '')
-                if addr in BLACKLIST_ADDR: continue
-                
-                # 3. 流動性過濾 (太低無法交易)
-                if p.get('liquidity', {}).get('usd', 0) < 500: continue
-                
-                # 4. 時間過濾 (如果有設定)
-                created_at = p.get('pairCreatedAt', 0)
-                if max_hours > 0 and created_at > 0:
-                    age_hours = (current_time - created_at) / (1000 * 60 * 60)
-                    if age_hours > max_hours: continue
-                
-                valid.append(p)
+            # 2. 獲取基本資訊
+            base_token = p.get('baseToken', {})
+            symbol = base_token.get('symbol', '').upper()
+            addr = base_token.get('address', '')
             
-            # 按時間倒序 (最新的在前面)
-            valid.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
-            return valid
-        except: return []
+            # 3. 絕對黑名單 & 符號過濾 (再殺一次 SOL)
+            if addr in BLACKLIST_ADDR: continue
+            if symbol == "SOL": continue 
+            
+            # 4. 🔥 核心絕殺：流動性過濾 (Liquidity Filter)
+            # 土狗幣的池子通常在 $1,000 ~ $200,000 之間
+            # 如果池子 > $500,000 (50萬鎂)，通常是老幣或超級大幣，我們不要
+            liquidity = p.get('liquidity', {}).get('usd', 0)
+            
+            if liquidity < 1000: continue # 太小，無法交易 (可能是詐騙)
+            if liquidity > 500000: continue # 太大，這絕對是老幣 (例如 SOL, JUP, RAY)
+            
+            # 5. 時間過濾 (24小時內)
+            created_at = p.get('pairCreatedAt', 0)
+            if created_at > 0:
+                age_hours = (current_time - created_at) / (1000 * 60 * 60)
+                if age_hours > 24: continue
+            
+            valid_pairs.append(p)
+            
+        # 按時間倒序 (最新的在前面)
+        valid_pairs.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
+        
+        return valid_pairs[:5]
 
+    except Exception as e: 
+        st.error(f"DexScreener 連線失敗: {e}")
+        return []
     # --- 執行策略 ---
     
     # 策略 1: 找剛出爐的 Pump 幣 (限制 24 小時內)
