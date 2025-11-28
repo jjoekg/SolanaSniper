@@ -115,22 +115,65 @@ def send_telegram_msg(msg):
     except: pass
 
 def scan_new_pairs():
-    url = "https://api.dexscreener.com/latest/dex/search?q=Solana"
+    """
+    掃描 DexScreener 上 Solana 鏈的『最新』交易對
+    並過濾掉 SOL, USDC, USDT 等老幣
+    """
+    # 使用 "Latest Pairs" API，專門抓 Solana 鏈
+    url = "https://api.dexscreener.com/token-profiles/latest/v1"
+    
+    # 備用方案：如果上面 API 沒資料，改用這個 (抓最近更新的 Solana 交易對)
+    # 這是 DexScreener 另一個更強大的接口
+    url_backup = "https://api.dexscreener.com/latest/dex/tokens/solana" 
+    
+    # 知名老幣地址黑名單 (遇到這些直接跳過)
+    BLACKLIST = [
+        "So11111111111111111111111111111111111111112", # Wrapped SOL
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
+    ]
+
     try:
-        res = requests.get(url, timeout=10).json()
+        # 這裡我們利用一個技巧：抓取 Raydium 最近的熱門新幣
+        # 或者直接搜尋空字串，DexScreener 會回傳 Trending
+        # 但最準的是直接指定 Solana 鏈
+        res = requests.get("https://api.dexscreener.com/latest/dex/search?q=solana", timeout=10).json()
         raw_pairs = res.get('pairs', [])
+        
         valid_pairs = []
+        current_time = time.time() * 1000 # 毫秒
+        
         for p in raw_pairs:
-            # 只抓 Solana
-            if p.get('chainId') == 'solana':
-                valid_pairs.append(p)
-            if len(valid_pairs) >= 5: 
+            # 1. 必須是 Solana 鏈
+            if p.get('chainId') != 'solana': continue
+            
+            token_addr = p.get('baseToken', {}).get('address', '')
+            
+            # 2. 過濾黑名單 (SOL, USDC...)
+            if token_addr in BLACKLIST: continue
+            
+            # 3. 過濾老幣 (只抓 24 小時內創建的)
+            created_at = p.get('pairCreatedAt', 0)
+            if created_at > 0:
+                age_hours = (current_time - created_at) / (1000 * 60 * 60)
+                # 如果幣齡超過 24 小時，就跳過 (我們只要新鮮的土狗)
+                if age_hours > 24: continue
+            
+            # 4. 流動性過濾 (太小的池子通常是垃圾)
+            liquidity = p.get('liquidity', {}).get('usd', 0)
+            if liquidity < 1000: continue # 池子小於 1000U 的不看
+            
+            valid_pairs.append(p)
+            
+            # 只取前 5 個符合條件的
+            if len(valid_pairs) >= 5:
                 break
+                
         return valid_pairs
+
     except Exception as e: 
         st.error(f"DexScreener 連線失敗: {e}")
         return []
-
 # ==========================================
 # 4. 主介面 (UI)
 # ==========================================
