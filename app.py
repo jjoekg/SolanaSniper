@@ -116,17 +116,12 @@ def send_telegram_msg(msg):
 
 def scan_new_pairs():
     """
-    掃描 DexScreener 上 Solana 鏈的『最新』交易對
-    並過濾掉 SOL, USDC, USDT 等老幣
+    策略：搜尋關鍵字 'pump' (針對 Pump.fun 新幣)，並過濾出 Solana 鏈
     """
-    # 使用 "Latest Pairs" API，專門抓 Solana 鏈
-    url = "https://api.dexscreener.com/token-profiles/latest/v1"
+    # 改用 'pump' 作為關鍵字，比較容易抓到新土狗
+    url = "https://api.dexscreener.com/latest/dex/search?q=pump"
     
-    # 備用方案：如果上面 API 沒資料，改用這個 (抓最近更新的 Solana 交易對)
-    # 這是 DexScreener 另一個更強大的接口
-    url_backup = "https://api.dexscreener.com/latest/dex/tokens/solana" 
-    
-    # 知名老幣地址黑名單 (遇到這些直接跳過)
+    # 黑名單 (過濾掉老幣/穩定幣)
     BLACKLIST = [
         "So11111111111111111111111111111111111111112", # Wrapped SOL
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
@@ -134,40 +129,48 @@ def scan_new_pairs():
     ]
 
     try:
-        # 這裡我們利用一個技巧：抓取 Raydium 最近的熱門新幣
-        # 或者直接搜尋空字串，DexScreener 會回傳 Trending
-        # 但最準的是直接指定 Solana 鏈
-        res = requests.get("https://api.dexscreener.com/latest/dex/search?q=solana", timeout=10).json()
+        res = requests.get(url, timeout=10).json()
         raw_pairs = res.get('pairs', [])
         
         valid_pairs = []
-        current_time = time.time() * 1000 # 毫秒
+        current_time = time.time() * 1000 
         
         for p in raw_pairs:
-            # 1. 必須是 Solana 鏈
+            # 1. 嚴格限定 Solana 鏈
             if p.get('chainId') != 'solana': continue
             
             token_addr = p.get('baseToken', {}).get('address', '')
             
-            # 2. 過濾黑名單 (SOL, USDC...)
+            # 2. 黑名單過濾
             if token_addr in BLACKLIST: continue
             
-            # 3. 過濾老幣 (只抓 24 小時內創建的)
+            # 3. 幣齡過濾 (放寬到 72 小時，確保有數據)
             created_at = p.get('pairCreatedAt', 0)
             if created_at > 0:
                 age_hours = (current_time - created_at) / (1000 * 60 * 60)
-                # 如果幣齡超過 24 小時，就跳過 (我們只要新鮮的土狗)
-                if age_hours > 24: continue
+                # 超過 3 天的就不看了，專注在近期熱點
+                if age_hours > 72: continue
             
-            # 4. 流動性過濾 (太小的池子通常是垃圾)
+            # 4. 流動性過濾 (至少要有 $500 鎂，不然是死盤)
             liquidity = p.get('liquidity', {}).get('usd', 0)
-            if liquidity < 1000: continue # 池子小於 1000U 的不看
+            if liquidity < 500: continue
             
             valid_pairs.append(p)
             
-            # 只取前 5 個符合條件的
+            # 取前 5 個
             if len(valid_pairs) >= 5:
                 break
+        
+        # 如果還是抓不到 (例如 Pump 關鍵字失效)，啟動備用方案：抓熱門榜
+        if not valid_pairs:
+            # 備用：搜尋 'solana' 但不設時間限制，只為了顯示數據
+            fallback_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+            res = requests.get(fallback_url, timeout=10).json()
+            raw_pairs = res.get('pairs', [])
+            for p in raw_pairs:
+                if p.get('chainId') == 'solana' and p.get('baseToken', {}).get('address') not in BLACKLIST:
+                     valid_pairs.append(p)
+                if len(valid_pairs) >= 5: break
                 
         return valid_pairs
 
