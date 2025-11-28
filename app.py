@@ -7,9 +7,12 @@ import streamlit.components.v1 as components
 import time
 
 # ==========================================
-# 1. 頁面設定
+# 1. 頁面設定 (必須是第一行)
 # ==========================================
 st.set_page_config(page_title="Solana 狙擊指揮中心", layout="wide", page_icon="🎯")
+
+# 除錯標記：如果你能看到這行字，代表 App 活著
+st.write("✅ 系統連線正常 | 等待指令...")
 
 st.sidebar.title("⚙️ 設定中心")
 st.sidebar.markdown("請先在此輸入 Key 才能使用 👇")
@@ -20,11 +23,10 @@ TG_CHAT_ID = st.sidebar.text_input("Telegram Chat ID (選填)")
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 
 # ==========================================
-# 2. 核心功能：Helius 資金溯源
+# 2. 核心功能
 # ==========================================
 def send_rpc(method, params):
     try:
-        # 增加 timeout 防止卡死
         res = requests.post(RPC_URL, json={"jsonrpc":"2.0","id":1,"method":method,"params":params}, timeout=10)
         return res.json()
     except: return {}
@@ -49,26 +51,17 @@ def trace_funder(wallet):
 
 def analyze_token(token_address):
     """分析代幣並回傳 Graph 對象與風險評級"""
-    # 1. 檢查 Key
-    if not HELIUS_KEY: 
-        return None, "請先在左側輸入 Helius API Key"
-    
-    # 2. 檢查地址格式 (簡單防呆)
-    if token_address.startswith("0x"):
-        return None, "這是以太坊地址，Helius 只能查 Solana"
+    if not HELIUS_KEY: return None, "請先在左側輸入 Helius API Key"
+    if token_address.startswith("0x"): return None, "這是以太坊地址，Helius 只能查 Solana"
 
-    # 3. 抓前 10 大股東
     res = send_rpc("getTokenLargestAccounts", [token_address])
     
-    if 'error' in res:
-        return None, f"API 錯誤: {res['error']['message']}"
-    if 'result' not in res: 
-        return None, "無效的代幣地址或查無數據"
+    if 'error' in res: return None, f"API 錯誤: {res['error']['message']}"
+    if 'result' not in res: return None, "無效的代幣地址或查無數據"
     
     accounts = res['result']['value'][:10]
     whales = []
     
-    # 解析真實錢包
     for acc in accounts:
         info = send_rpc("getAccountInfo", [acc['address'], {"encoding": "jsonParsed"}])
         try:
@@ -78,7 +71,7 @@ def analyze_token(token_address):
     
     unique_whales = list(set(whales))
     
-    # 4. 畫圖 & 偵測
+    # 畫圖
     G = nx.DiGraph()
     short_token = token_address[:4] + "..."
     G.add_node(token_address, label=f"Token\n{short_token}", color="#ffd700", size=25, shape="star")
@@ -94,3 +87,120 @@ def analyze_token(token_address):
         progress_bar.progress((i + 1) / len(unique_whales))
         
         G.add_node(whale, label=f"Holder\n{whale[:4]}...", color="#97c2fc", size=15)
+        G.add_edge(whale, token_address, color="#cccccc")
+        
+        funder = trace_funder(whale)
+        if funder:
+            if funder not in G:
+                G.add_node(funder, label=f"🚨 SOURCE\n{funder[:4]}...", color="#ff4b4b", size=20, shape="box")
+            G.add_edge(funder, whale, color="#ff0000")
+            
+            funder_map[funder] = funder_map.get(funder, 0) + 1
+            if funder_map[funder] > 1:
+                risk_score += 10
+
+    status_text.empty()
+    progress_bar.empty()
+    
+    return G, risk_score
+
+# ==========================================
+# 3. 輔助功能
+# ==========================================
+def send_telegram_msg(msg):
+    if not TG_TOKEN or not TG_CHAT_ID: return
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg}, timeout=5)
+    except: pass
+
+def scan_new_pairs():
+    url = "https://api.dexscreener.com/latest/dex/search?q=Solana"
+    try:
+        res = requests.get(url, timeout=10).json()
+        raw_pairs = res.get('pairs', [])
+        valid_pairs = []
+        for p in raw_pairs:
+            # 只抓 Solana
+            if p.get('chainId') == 'solana':
+                valid_pairs.append(p)
+            if len(valid_pairs) >= 5: 
+                break
+        return valid_pairs
+    except Exception as e: 
+        st.error(f"DexScreener 連線失敗: {e}")
+        return []
+
+# ==========================================
+# 4. 主介面 (UI)
+# ==========================================
+st.title("🚀 Solana 老鼠倉獵人 (Helius Pro)")
+
+if not HELIUS_KEY:
+    st.warning("⚠️ 請先在左側欄位輸入 Helius API Key！")
+
+tab1, tab2 = st.tabs(["🔍 手動查幣", "🤖 自動掃描新幣"])
+
+# --- TAB 1 ---
+with tab1:
+    target = st.text_input("輸入代幣地址", "2zMMhcVQhZkJeb4h5Rpp47aZPaej4XMs75c8V4Jkpump")
+    if st.button("開始分析", key="btn1"):
+        with st.spinner("🕵️‍♂️ 正在進行鏈上肉搜..."):
+            G, risk_or_error = analyze_token(target)
+            if G is None:
+                st.error(f"分析失敗：{risk_or_error}")
+            else:
+                risk = risk_or_error
+                if risk > 0:
+                    st.error(f"🚨 警告！偵測到老鼠倉集團！風險指數: {risk}")
+                else:
+                    st.success("✅ 籌碼結構相對健康。")
+                
+                # 🔥 關鍵修正：加入 cdn_resources='in_line'
+                net = Network(height="500px", width="100%", bgcolor="#222222", font_color="white", directed=True, cdn_resources='in_line')
+                net.from_nx(G)
+                net.save_graph("graph.html")
+                with open("graph.html", "r", encoding="utf-8") as f:
+                    components.html(f.read(), height=520)
+
+# --- TAB 2 ---
+with tab2:
+    st.write("自動抓取 DexScreener Solana 熱門新幣。")
+    if st.button("🛡️ 掃描市場新幣", key="btn2"):
+        if not HELIUS_KEY:
+             st.error("❌ 缺少 Helius API Key")
+        else:
+            pairs = scan_new_pairs()
+            if not pairs:
+                st.warning("暫無數據。")
+            else:
+                for pair in pairs:
+                    name = pair.get('baseToken', {}).get('name', 'Unknown')
+                    addr = pair.get('baseToken', {}).get('address', '')
+                    price = pair.get('priceUsd', '0')
+                    
+                    st.markdown(f"**檢查代幣：{name}**")
+                    st.code(addr)
+                    st.write(f"Price: ${price}")
+                    
+                    G, risk_or_error = analyze_token(addr)
+                    
+                    if G is None:
+                        st.warning(f"⚠️ 無法分析: {risk_or_error}")
+                    else:
+                        risk = risk_or_error
+                        if risk > 0:
+                            st.error(f"❌ 風險 (Risk: {risk})")
+                            send_telegram_msg(f"🚨 危險新幣：{name}\n地址：{addr}\n風險：老鼠倉活躍！")
+                        else:
+                            st.success("✅ 安全")
+                        
+                        # 同樣加入 in_line 修正
+                        net = Network(height="400px", width="100%", bgcolor="#222222", font_color="white", directed=True, cdn_resources='in_line')
+                        net.from_nx(G)
+                        fname = f"graph_{addr[:4]}.html"
+                        net.save_graph(fname)
+                        with open(fname, "r", encoding="utf-8") as f:
+                            components.html(f.read(), height=420)
+                    
+                    st.divider()
